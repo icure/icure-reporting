@@ -7,6 +7,23 @@ import {flatMap, isEqual, omit} from 'lodash'
 import * as Peg from 'pegjs'
 
 const fs = require('fs')
+const vorpal = new (require('vorpal'))()
+import {Args, CommandInstance} from "vorpal";
+
+vorpal
+	.command('query [input...]', 'Queries iCure')
+	.action(async function (this: CommandInstance, args: Args) {
+		const input = args.input.join(' ')
+		this.log('Parsing query: ' + input)
+		const parsedInput = parser.parse(input)
+		const output = await rewriteFilter(parsedInput, true, "", "")
+		const finalResult = await handleFinalRequest(output)
+		this.log(finalResult)
+	});
+
+vorpal
+	.delimiter('icure-reporting$')
+	.show();
 
 const LocalStorage: any = require('node-localstorage').LocalStorage
 // @ts-ignore
@@ -37,6 +54,8 @@ const hcpartyId = "782f1bcd-9f3f-408a-af1b-cd9f3f908a98"
 const privateKey = ''
 
 const requestToFilterTypeMap = {'SVC': 'ServiceByHcPartyTagCodeDateFilter', 'HE': 'HealthElementByHcPartyTagCodeFilter'}
+
+
 
 async function rewriteFilter(filter: any, first: boolean, mainEntity: string, subEntity: string): Promise<any> {
 	try {
@@ -256,4 +275,8 @@ async function tests(): Promise<boolean> {
 	return true
 }
 
+<<<<<<< HEAD
 run()
+=======
+//run()
+>>>>>>> d50e932 (use vorpal)
