@@ -1,14 +1,78 @@
-// TODO patient merges?
-// npm link /Users/simon/Documents/taktik/icc-api
-import * as WebCrypto from "node-webcrypto-ossl"
 import fetch from "node-fetch"
-import {iccContactApi, IccCryptoXApi, IccHcpartyXApi, iccPatientApi, ServiceDto, iccHelementApi, HealthElementDto} from 'icc-api'
-import {flatMap, isEqual, omit} from 'lodash'
+import {HealthElementDto, ServiceDto, PatientDto, UserDto} from 'icc-api'
+import {flatMap} from 'lodash'
 import * as Peg from 'pegjs'
+import {Api} from './api'
+require('node-json-color-stringify');
 
 const fs = require('fs')
 const vorpal = new (require('vorpal'))()
 import {Args, CommandInstance} from "vorpal";
+
+const localStorage = (global as any).localStorage = new (require('node-localstorage').LocalStorage)('/tmp')
+;(global as any).Storage = ''
+
+const options = {
+	username: '',
+	password: '',
+	host: 'https://backendb.svc.icure.cloud/rest/v1'
+}
+
+let api = new Api(options.host, {Authorization: `Basic ${Buffer.from(`${options.username}:${options.password}`).toString('base64')}`}, fetch as any )
+let hcpartyId: string = ''
+
+api.hcpartyicc.getCurrentHealthcareParty().then(hcp => {
+	hcpartyId = hcp.id
+	if (hcp.id === "782f1bcd-9f3f-408a-af1b-cd9f3f908a98") {
+		const privateKey = ''
+		api.cryptoicc.loadKeyPairsAsTextInBrowserLocalStorage(hcpartyId, api.cryptoicc.utils.hex2ua(privateKey))
+	}
+})
+
+vorpal
+	.command('login <username> <password> [host]', 'Login to iCure')
+	.action(async function (this: CommandInstance, args: Args) {
+		options.username = args.username
+		options.password = args.password
+		args.host && (options.host = args.host)
+
+		api = new Api(options.host, {Authorization: `Basic ${Buffer.from(`${options.username}:${options.password}`).toString('base64')}`}, fetch as any )
+	});
+
+vorpal
+	.command('pki <hcpId> <key>', 'Private Key Import')
+	.action(async function (this: CommandInstance, args: Args) {
+		const hcpId = args.hcpId
+		const key = args.key
+
+		await api.cryptoicc.loadKeyPairsAsTextInBrowserLocalStorage(hcpId, api.cryptoicc.utils.hex2ua(key))
+		if (await api.cryptoicc.checkPrivateKeyValidity(await api.hcpartyicc.getHealthcareParty(hcpId))) {
+			this.log("Key is valid")
+		} else {
+			this.log("Key is invalid")
+		}
+	});
+
+vorpal
+	.command('lpkis', 'List Private Keys')
+	.action(async function (this: CommandInstance, args: Args) {
+		const users = (await api.usericc.listUsers(undefined, undefined, undefined)).rows
+		users.reduce(async (p: Promise<any>, u: UserDto) => {
+			await p
+			if (u.healthcarePartyId) {
+				const hcp = await api.hcpartyicc.getHealthcareParty(u.healthcarePartyId)
+				try {
+					if (hcp.publicKey && await api.cryptoicc.checkPrivateKeyValidity(hcp)) {
+						this.log(`√ ${hcp.id}: ${hcp.firstName} ${hcp.lastName}`)
+					} else {
+						this.log(`X ${hcp.id}: ${hcp.firstName} ${hcp.lastName}`)
+					}
+				} catch(e) {
+					this.log(`X ${hcp.id}: ${hcp.firstName} ${hcp.lastName}`)
+				}
+			}
+		}, Promise.resolve())
+	});
 
 vorpal
 	.command('query [input...]', 'Queries iCure')
@@ -18,44 +82,19 @@ vorpal
 		const parsedInput = parser.parse(input)
 		const output = await rewriteFilter(parsedInput, true, "", "")
 		const finalResult = await handleFinalRequest(output)
-		this.log(finalResult)
+		this.log((JSON as any).colorStringify(finalResult.rows.map((p:PatientDto) => ({ id: p.id, firstName: p.firstName, lastName: p.lastName, dateOfBirth: p.dateOfBirth})), null, ' '))
 	});
 
 vorpal
 	.delimiter('icure-reporting$')
 	.show();
 
-const LocalStorage: any = require('node-localstorage').LocalStorage
-// @ts-ignore
-global.localStorage = new LocalStorage('/tmp')
-// @ts-ignore
-global.Storage = ''
-
 const grammar = fs.readFileSync('./pegjs', 'utf8')
 const parser = Peg.generate(grammar)
 
 const debug = false
-const host = 'https://backendb.svc.icure.cloud/rest/v1'
-const username = ''
-const password = ''
-const headers = {Authorization: `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`}
-
-// @ts-ignore // todo should not have to use ts-ignore here?
-let hcpartyicc = new IccHcpartyXApi(host, headers, fetch)
-// @ts-ignore
-const patienticc = new iccPatientApi(host, headers, fetch)
-const cryptoicc = new IccCryptoXApi(host, headers, hcpartyicc, patienticc, new WebCrypto())
-// @ts-ignore
-const contacticc = new iccContactApi(host, headers, fetch)
-// @ts-ignore
-const helementicc = new iccHelementApi(host, headers, fetch)
-
-const hcpartyId = "782f1bcd-9f3f-408a-af1b-cd9f3f908a98"
-const privateKey = ''
 
 const requestToFilterTypeMap = {'SVC': 'ServiceByHcPartyTagCodeDateFilter', 'HE': 'HealthElementByHcPartyTagCodeFilter'}
-
-cryptoicc.loadKeyPairsAsTextInBrowserLocalStorage(hcpartyId, cryptoicc.utils.hex2ua(privateKey))
 
 async function rewriteFilter(filter: any, first: boolean, mainEntity: string, subEntity: string): Promise<any> {
 	try {
@@ -71,7 +110,7 @@ async function rewriteFilter(filter: any, first: boolean, mainEntity: string, su
 				const rewritten = await rewriteFilter(filter.filter, first, mainEntity, filter.entity || subEntity)
 				const body = {filter: rewritten}
 				if (debug) console.log("Request SVC: " + JSON.stringify(body))
-				const servicesOutput = await contacticc.filterServicesBy(undefined, undefined, undefined, body) // TODO here and elsewhere or any
+				const servicesOutput = await api.contacticc.filterServicesBy(undefined, undefined, undefined, body) // TODO here and elsewhere or any
 				if (mainEntity === "PAT") {
 					const patientIds: string[] = await servicesToPatientIds(servicesOutput)
 					return {$type: "PatientByIdsFilter", ids: patientIds}
@@ -80,7 +119,7 @@ async function rewriteFilter(filter: any, first: boolean, mainEntity: string, su
 				const rewritten = await rewriteFilter(filter.filter, first, mainEntity, filter.entity || subEntity)
 				const body = {filter: rewritten}
 				console.log("Request HE: " + JSON.stringify(body))
-				const helementOutput = await helementicc.filterBy(body)
+				const helementOutput = await api.helementicc.filterBy(body)
 				if (mainEntity === "PAT") {
 					console.log("helement body: " + JSON.stringify(helementOutput))
 					console.log("helementOutput: " + JSON.stringify(helementOutput))
@@ -126,14 +165,14 @@ async function rewriteFilter(filter: any, first: boolean, mainEntity: string, su
 
 async function handleFinalRequest(filter: any): Promise<any> {
 	if (filter.$type === "request" && filter.entity && filter.filter) {
-		if (filter.entity == 'PAT') {
-			return await patienticc.filterBy(undefined, undefined, undefined, undefined, undefined, undefined, {filter: filter.filter})
+		if (filter.entity === 'PAT') {
+			return await api.patienticc.filterByWithUser(await api.usericc.getCurrentUser(), undefined, undefined, undefined, undefined, undefined, undefined, {filter: filter.filter})
 		} else {
 			console.error("Entity not supported yet: " + filter.entity)
 			return Promise.reject()
 		}
 	} else {
-		console.error('Filter not valid: ' + JSON.stringify(filter))
+		console.error('Filter not valid: ' + JSON.stringify(filter, null, ' '))
 		return {}
 	}
 }
@@ -141,7 +180,7 @@ async function handleFinalRequest(filter: any): Promise<any> {
 async function servicesToPatientIds(servicesOutput: any): Promise<string[]> {
 	try {
 		const services: ServiceDto[] = servicesOutput.rows
-		const extractPromises = services.map((svc: ServiceDto) => cryptoicc.extractKeysFromDelegationsForHcpHierarchy(hcpartyId, svc.contactId || "", svc.cryptedForeignKeys || {}))
+		const extractPromises = services.map((svc: ServiceDto) => api.cryptoicc.extractKeysFromDelegationsForHcpHierarchy(hcpartyId, svc.contactId || "", svc.cryptedForeignKeys || {}))
 		return [...new Set(flatMap(await Promise.all(extractPromises), it => it.extractedKeys))] // set to remove duplicates
 		//return await patienticc.getPatients({ids: patientIds})
 	} catch (error) {
@@ -154,7 +193,7 @@ async function servicesToPatientIds(servicesOutput: any): Promise<string[]> {
 async function helementsToPatientIds(helementOutput: any): Promise<string[]> {
 	try {
 		const helements: HealthElementDto[] = helementOutput
-		const extractPromises = helements.map((he: HealthElementDto) => cryptoicc.extractKeysFromDelegationsForHcpHierarchy(hcpartyId, he.id || "", he.cryptedForeignKeys || {}))
+		const extractPromises = helements.map((he: HealthElementDto) => api.cryptoicc.extractKeysFromDelegationsForHcpHierarchy(hcpartyId, he.id || "", he.cryptedForeignKeys || {}))
 		return [...new Set(flatMap(await Promise.all(extractPromises), it => it.extractedKeys))] // set to remove duplicates
 	} catch (error) {
 		console.error('Error while converting health elements to patients')
@@ -165,7 +204,6 @@ async function helementsToPatientIds(helementOutput: any): Promise<string[]> {
 
 async function run(): Promise<boolean> {
 	//if (!(await tests())) return false
-	await tests()
 	try {
 		// TODO labresult instead of diagnosis
 		//const input = "PAT[(age>45y & SVC[ICPC == T89 & :CD-ITEM == diagnosis]) - SVC[LOINC == Hba1c & :CD-ITEM == diagnosis]]"
@@ -208,75 +246,3 @@ async function run(): Promise<boolean> {
 	}
 	return true
 }
-
-async function tests(): Promise<boolean> {
-	await cryptoicc.loadKeyPairsAsTextInBrowserLocalStorage(hcpartyId, cryptoicc.utils.hex2ua(privateKey))
-	if (!cryptoicc.checkPrivateKeyValidity(await hcpartyicc.getCurrentHealthcareParty())) {
-		console.error('Private key validity test failed!')
-		return false
-	}
-
-	const filter = {
-		"$type": "request",
-		"entity": "PAT",
-		"filter": {
-			"$type": "IntersectionFilter",
-			"filters": [
-				{
-					"$type": "PatientByHcPartyDateOfBirthBetweenFilter",
-					"healthcarePartyId": "782f1bcd-9f3f-408a-af1b-cd9f3f908a98",
-					"minDateOfBirth": 0,
-					"maxDateOfBirth": "19740920"
-				},
-				{
-					"$type": "request",
-					"entity": "SVC",
-					"filter": {
-						"$type": "IntersectionFilter",
-						"filters": [
-							{
-								"$type": "PLACEHOLDER", //"ServiceByHcPartyTagCodeDateFilter",
-								"healthcarePartyId": "782f1bcd-9f3f-408a-af1b-cd9f3f908a98",
-								"codeCode": "T89", // D6Aqqch
-								"codeType": "ICPC" // "LOINC"
-								//"dateSTart" // à faire
-							},
-							{
-								"$type": "PLACEHOLDER", //"ServiceByHcPartyTagCodeDateFilter",
-								"healthcarePartyId": "782f1bcd-9f3f-408a-af1b-cd9f3f908a98",
-								"tagCode": "diagnosis", // "labresult"
-								"tagType": "CD-ITEM"
-							}
-						]
-					}
-				}
-			]
-		}
-	}
-	const input = "PAT[age>45y & SVC[ICPC == T89 & :CD-ITEM == diagnosis]]"
-	const parsedInput = parser.parse(input)
-
-	const p = JSON.parse(JSON.stringify(parsedInput)) // deep copy since omit mutates its inputs without telling us in the doc !!!
-	const passed = isEqual(omit(p, ['filter.filters[0].maxDateOfBirth']), omit(filter, ['filter.filters[0].maxDateOfBirth']))
-	if (!passed) {
-		console.error('PegJS test failed! Output: ' + JSON.stringify(p))
-		return false
-	}
-
-	const output = await rewriteFilter(parsedInput, true, "", "")
-	//console.log('Rewritten filter: ' + JSON.stringify(output))
-	const finalResult = await handleFinalRequest(output)
-	//console.log(finalResult)
-	if (finalResult.totalSize !== 3) {
-		console.error('Full test failed, totalSize=' + finalResult.totalSize + ' (should be 3)')
-		return false
-	}
-
-	return true
-}
-
-<<<<<<< HEAD
-run()
-=======
-//run()
->>>>>>> d50e932 (use vorpal)
