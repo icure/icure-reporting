@@ -2,7 +2,7 @@
 // npm link /Users/simon/Documents/taktik/icc-api
 import * as WebCrypto from "node-webcrypto-ossl"
 import fetch from "node-fetch"
-import {iccContactApi, IccCryptoXApi, IccHcpartyXApi, iccPatientApi, ServiceDto} from 'icc-api'
+import {iccContactApi, IccCryptoXApi, IccHcpartyXApi, iccPatientApi, ServiceDto, iccHelementApi, HealthElementDto} from 'icc-api'
 import {flatMap, isEqual, omit} from 'lodash'
 import * as Peg from 'pegjs'
 
@@ -29,6 +29,8 @@ const patienticc = new iccPatientApi(host, headers, fetch)
 const cryptoicc = new IccCryptoXApi(host, headers, hcpartyicc, patienticc, new WebCrypto())
 // @ts-ignore
 const contacticc = new iccContactApi(host, headers, fetch)
+// @ts-ignore
+const helementicc = new iccHelementApi(host, headers, fetch)
 
 const hcpartyId = "782f1bcd-9f3f-408a-af1b-cd9f3f908a98"
 const privateKey = ''
@@ -49,24 +51,46 @@ async function rewriteFilter(filter: any, first: boolean, mainEntity: string = "
 					const patientIds: string[] = await servicesToPatientIds(servicesOutput)
 					return {$type: "PatientByIdsFilter", ids: patientIds}
 				}
+			} else if (filter.entity === "HE") {
+				const body = {filter: filter.filter}
+				const helementOutput = await helementicc.filterBy(body)
+				if (mainEntity === "PAT") {
+					console.log('AAAAA')
+					console.log(body)
+					console.log(helementOutput)
+					return {}
+					//const patientIds: string[] = await helementsToPatientIds(helementOutput)
+					//return {$type: "PatientByIdsFilter", ids: patientIds}
+				}
+			}
+			if (filter.entity === "SUBTRACT") {
+				const left = await rewriteFilter(filter.left, first, mainEntity)
+				const right = await rewriteFilter(filter.right, first, mainEntity)
+				return {$type: "ComplementFilter", superSet: left, subSet: right}
 			}
 			console.error("Filter not supported yet: " + filter)
 			return Promise.reject()
 		} else if (filter.$type !== "request") {
-			if (filter.filters) { // TODO also filter.filter or other?
-				let target = Object.assign({}, filter)
-				target.filters = await Promise.all(filter.filters.map(async (f: any) => await rewriteFilter(f, first, mainEntity))) // TODO cleaner way ?
+			if (filter.filters) {
+				let target = JSON.parse(JSON.stringify(filter))
+				target.filters = await Promise.all(filter.filters.map(async (f: any) => await rewriteFilter(f, first, mainEntity)))
 				return target
-			} else {
+			} else if (filter.subSet || filter.superSet) {
+				let target = JSON.parse(JSON.stringify(filter))
+				if (filter.subSet) target.subSet = await rewriteFilter(target.subSet, first, mainEntity)
+				if (filter.superSet) target.superSet = await rewriteFilter(target.superSet, first, mainEntity)
+				console.log(target)
+				return target
+			} else { // TODO maybe other conditions here
 				return filter
 			}
 		} else { // never hits this
 			console.error("Failed to parse filter: " + JSON.stringify(filter))
 			return Promise.reject()
 		}
-	} catch (e) {
-		console.error('Error occurred while rewriting filter: ')
-		console.error(e)
+	} catch (error) {
+		console.error('Error occurred while rewriting filter: ' + JSON.stringify(filter))
+		console.error(error)
 		return Promise.reject()
 	}
 }
@@ -74,14 +98,13 @@ async function rewriteFilter(filter: any, first: boolean, mainEntity: string = "
 async function handleFinalRequest(filter: any): Promise<any> {
 	if (filter.$type === "request" && filter.entity && filter.filter) {
 		if (filter.entity == 'PAT') {
-			//console.log('Final filter: ' + JSON.stringify(filter.filter))
 			return await patienticc.filterBy(undefined, undefined, undefined, undefined, undefined, undefined, {filter: filter.filter})
 		} else {
 			console.error("Entity not supported yet: " + filter.entity)
 			return Promise.reject()
 		}
 	} else {
-		console.error('Filter not valid: ' + filter)
+		console.error('Filter not valid: ' + JSON.stringify(filter))
 		return {}
 	}
 }
@@ -100,9 +123,31 @@ async function servicesToPatientIds(servicesOutput: any): Promise<string[]> {
 }
 
 async function run(): Promise<boolean> {
-	if (!(await tests())) return false
-
+	//if (!(await tests())) return false
+	await tests()
 	try {
+		// TODO labresult instead of diagnosis,
+		//const input = "PAT[(age>45y & SVC[ICPC == T89 & :CD-ITEM == diagnosis]) - SVC[LOINC == Hba1c & :CD-ITEM == diagnosis]]"
+		const input = "PAT[age>45y & SVC[ICPC == T89{<1m} & :CD-ITEM == diagnosis | ICPC == T90] - SVC[ICPC == T90]]"
+		const parsedInput = parser.parse(input)
+		//console.log('ParsedInput: ' + JSON.stringify(parsedInput))
+		const output = await rewriteFilter(parsedInput, true, "")
+		//console.log('Rewritten filter: ' + JSON.stringify(output))
+		const finalResult = await handleFinalRequest(output)
+		//console.log(finalResult)
+		console.log(finalResult.totalSize)
+
+		// femme de 25-65 sans cancer du col, sans procédure 002 ou 003 faite ou refusée(?) dans les 3 dernières années
+		//const input2 = "PAT[age>25y & age<65y - (SVC[CISP == X75{<3y19000101 -> 20200101} & :CD-ITEM == diagnosis] | HE[CISP == X75]) - SVC[CISP == X37.002] - SVC[CISP == X37.003]]"
+		const input2 = "PAT[age>25y & age<65y - SVC[CISP == X75{19000101 -> 20200101} & :CD-ITEM == diagnosis] - SVC[CISP == X37.002] - SVC[CISP == X37.003]]"
+		const parsedInput2 = parser.parse(input2)
+		console.log('-> ParsedInput: ' + JSON.stringify(parsedInput2))
+		const output2 = await rewriteFilter(parsedInput2, true, "")
+		console.log('-> Rewritten filter: ' + JSON.stringify(output2))
+		const finalResult2 = await handleFinalRequest(output2)
+		//console.log(finalResult2)
+		console.log(finalResult2.totalSize)
+
 		//console.log(JSON.stringify(parsedInput))
 		//const test = await servicesToPatientIds(servicesOutput)
 		//console.log('PatientIds: ' + JSON.stringify(test))
@@ -151,13 +196,14 @@ async function tests(): Promise<boolean> {
 							{
 								"$type": "ServiceByHcPartyTagCodeDateFilter",
 								"healthcarePartyId": "782f1bcd-9f3f-408a-af1b-cd9f3f908a98",
-								"codeCode": "T89",
-								"codeType": "ICPC"
+								"codeCode": "T89", // D6Aqqch
+								"codeType": "ICPC" // "LOINC"
+								//"dateSTart" // à faire
 							},
 							{
 								"$type": "ServiceByHcPartyTagCodeDateFilter",
 								"healthcarePartyId": "782f1bcd-9f3f-408a-af1b-cd9f3f908a98",
-								"tagCode": "diagnosis",
+								"tagCode": "diagnosis", // "labresult"
 								"tagType": "CD-ITEM"
 							}
 						]
@@ -166,6 +212,8 @@ async function tests(): Promise<boolean> {
 			]
 		}
 	}
+	// TODO SVC means "at least one exists", i could extend it to "SVC[...] > 3"
+	// TODO !SVC
 	const input = "PAT[age>45y & SVC[ICPC == T89 & :CD-ITEM == diagnosis]]"
 	const parsedInput = parser.parse(input)
 
@@ -173,13 +221,17 @@ async function tests(): Promise<boolean> {
 	const passed = isEqual(omit(p, ['filter.filters[0].maxDateOfBirth']), omit(filter, ['filter.filters[0].maxDateOfBirth']))
 	if (!passed) {
 		console.error('PegJS test failed!')
+		console.log(p)
 		return false
 	}
 
 	const output = await rewriteFilter(parsedInput, true, "")
+	//console.log('Rewritten filter: ' + JSON.stringify(output))
 	const finalResult = await handleFinalRequest(output)
+	//console.log(finalResult)
 	if (finalResult.totalSize !== 3) {
 		console.error('Full test failed, totalSize=' + finalResult.totalSize + ' (should be 3)')
+		return false
 	}
 
 	return true
