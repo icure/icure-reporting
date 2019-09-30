@@ -27,7 +27,9 @@ import { Args, CommandInstance } from 'vorpal'
 // TODO & -> | -> -
 // TODO bundle pkg and send it
 
-;(global as any).localStorage = new (require('node-localstorage').LocalStorage)('/tmp')
+const tmp = require('os').tmpdir()
+console.log('Tmp dir: ' + tmp)
+;(global as any).localStorage = new (require('node-localstorage').LocalStorage)(tmp)
 ;(global as any).Storage = ''
 
 const options = {
@@ -44,6 +46,10 @@ api.hcpartyicc.getCurrentHealthcareParty().then(hcp => {
 	if (hcp.id === '782f1bcd-9f3f-408a-af1b-cd9f3f908a98') {
 		const privateKey = ''
 		api.cryptoicc.loadKeyPairsAsTextInBrowserLocalStorage(hcpartyId, api.cryptoicc.utils.hex2ua(privateKey))
+			.catch(error => {
+				console.error('Error: in loadKeyPairsAsTextInBrowserLocalStorage')
+				console.error(error)
+			})
 	}
 })
 
