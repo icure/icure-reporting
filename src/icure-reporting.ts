@@ -65,20 +65,6 @@ const grammar = fs.readFileSync(
 )
 const parser = Peg.generate(grammar)
 
-healthcarePartyApi.getCurrentHealthcareParty().then((hcp) => {
-	hcpartyId = hcp.id
-	if (hcp.id === '782f1bcd-9f3f-408a-af1b-cd9f3f908a98') {
-		const privateKey =
-			''
-		cryptoApi
-			.loadKeyPairsAsTextInBrowserLocalStorage(hcpartyId, hex2ua(privateKey))
-			.catch((error) => {
-				console.error('Error: in loadKeyPairsAsTextInBrowserLocalStorage')
-				console.error(error)
-			})
-	}
-})
-
 vorpal
 	.command('repo <username> <password> [host]', 'Login to Queries repository')
 	.action(async function (this: CommandInstance, args: Args) {
