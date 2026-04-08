@@ -1,154 +1,162 @@
-/* eslint-disable @typescript-eslint/no-var-requires */
-// noinspection RequiredAttributes
+import { IcureApi, hex2ua } from '@icure/api'
+import type { Apis } from '@icure/api'
+import * as nodeCrypto from 'node:crypto'
 
-import fetch from 'node-fetch'
-import { User, Api, hex2ua } from '@icure/api'
-import { crypto } from '@icure/api/node-compat'
-
-import { forEachDeep, mapDeep } from './reduceDeep'
+import { forEachDeep, mapDeep } from './reduceDeep.js'
 import { isObject } from 'lodash'
-import * as Peg from 'pegjs'
+import * as peggy from 'peggy'
 import { format, addMonths, addYears } from 'date-fns'
 
-import * as colors from 'colors/safe'
-import { Args, CommandInstance } from 'vorpal'
-import { filter } from './filters'
-import { writeExcel } from './xls'
+import pc from 'picocolors'
+import { filter, composePolicies } from './filters.js'
+import type { DeferralPolicy } from './filters.js'
+import type { PeggyParseError, RepoDocument, RepoAllDocsResponse } from './types.js'
+import { writeExcel } from './xls.js'
 
-require('node-json-color-stringify')
-
-const path = require('path')
-const fs = require('fs')
-const vorpal = new (require('vorpal'))()
+import * as path from 'node:path'
+import * as fs from 'node:fs'
+import { inspect } from 'node:util'
+import * as readline from 'node:readline/promises'
+import { FileStorageFacade, FileKeyStorageFacade } from './local-storage-shim.js'
+import { createCryptoStrategies } from './crypto-strategies.js'
 
 // TODO use a logger
 // TODO patient merges
 // TODO more examples, with invoices/health elements/contacts, at first level
 
 const debug = false
-const tmp = require('os').tmpdir()
-if (debug) {
-	console.log('Tmp dir: ' + tmp)
-}
-;(global as any).localStorage = new (require('node-localstorage').LocalStorage)(
-	tmp,
-	5 * 1024 * 1024 * 1024
-)
-;(global as any).Storage = ''
 
-const options = {
+const storage = new FileStorageFacade()
+const keyStorage = new FileKeyStorageFacade()
+const keyMap: Map<string, { publicKey: JsonWebKey; privateKey: JsonWebKey }> = new Map()
+
+const options: {
+	username: string
+	password: string
+	host: string
+	repoUsername: string | null
+	repoPassword: string | null
+	repoHost: string | null
+	repoHeader: Record<string, string>
+} = {
 	username: '',
 	password: '',
-	host: 'https://backendb.svc.icure.cloud/rest/v1',
+	host: 'https://qa.icure.cloud',
 	repoUsername: null,
 	repoPassword: null,
 	repoHost: null,
 	repoHeader: {},
 }
 
-let {
-	healthcarePartyApi,
-	cryptoApi,
-	userApi,
-	healthcareElementApi,
-	invoiceApi,
-	patientApi,
-	contactApi,
-} = Api(options.host, options.username, options.password, crypto)
+let api: Apis
 let hcpartyId = ''
+
+async function initApis() {
+	api = await IcureApi.initialise(
+		options.host,
+		{ username: options.username, password: options.password },
+		createCryptoStrategies(keyMap),
+		nodeCrypto.webcrypto as any,
+		undefined,
+		{ storage, keyStorage },
+	)
+}
 let latestQuery: string | null = null
 const existingVariables = new Map<string, string>()
 
 const grammar = fs.readFileSync(
-	path.resolve(__dirname, '../grammar/icure-reporting-parser.pegjs'),
-	'utf8'
+	path.resolve(__dirname, '../grammar/icure-reporting-parser.peggy'),
+	'utf8',
 )
-const parser = Peg.generate(grammar)
+const parser = peggy.generate(grammar)
 
-vorpal
-	.command('repo <username> <password> [host]', 'Login to Queries repository')
-	.action(async function (this: CommandInstance, args: Args) {
-		args.host && (options.repoHost = args.host)
-		options.repoHeader = {
-			Authorization: `Basic ${Buffer.from(`${args.username}:${args.password}`).toString(
-				'base64'
-			)}`,
+let rl: readline.Interface
+
+function log(msg: string) {
+	console.log(msg)
+}
+
+async function question(prompt: string): Promise<string> {
+	return rl.question(prompt)
+}
+
+// --- Command Handlers ---
+
+async function cmdRepo(args: string[]) {
+	const [username, password, host] = args
+	if (!username || !password) {
+		log(pc.red('Usage: repo <username> <password> [host]'))
+		return
+	}
+	if (host) options.repoHost = host
+	options.repoHeader = {
+		Authorization: `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`,
+	}
+}
+
+async function cmdLogin(args: string[]) {
+	const [username, password, host] = args
+	if (!username || !password) {
+		log(pc.red('Usage: login <username> <password> [host]'))
+		return
+	}
+	options.username = username
+	options.password = password
+	if (host) options.host = host
+	await initApis()
+	const hcp = await api.healthcarePartyApi.getCurrentHealthcareParty()
+	hcpartyId = hcp.id!
+}
+
+async function cmdPki(args: string[]) {
+	const [hcpId, key] = args
+	if (!hcpId || !key) {
+		log(pc.red('Usage: pki <hcpId> <key>'))
+		return
+	}
+	// In v8, keys are managed via KeyStorageFacade + CryptoStrategies.
+	// Store the raw private key in key storage, then re-init the API so CryptoStrategies picks it up.
+	const keyBytes = hex2ua(key)
+	const privateJwk = await nodeCrypto.webcrypto.subtle
+		.importKey('pkcs8', keyBytes, { name: 'RSA-OAEP', hash: 'SHA-256' }, true, ['decrypt'])
+		.then((k) => nodeCrypto.webcrypto.subtle.exportKey('jwk', k))
+	delete privateJwk.alg
+	const publicJwk: JsonWebKey = {
+		kty: privateJwk.kty,
+		n: privateJwk.n,
+		e: privateJwk.e,
+		ext: true,
+		key_ops: ['encrypt'],
+	}
+	keyMap.set(hcpId, { privateKey: privateJwk, publicKey: publicJwk })
+	log('Key stored. Re-initializing API...')
+	await initApis()
+	log('Key imported successfully')
+}
+
+async function cmdLpkis() {
+	const pubKeys = await api.cryptoApi.getCurrentUserHierarchyAvailablePublicKeysHex()
+	if (pubKeys.length > 0) {
+		for (const pk of pubKeys) {
+			log(`${pc.green('√')} ${pk.substring(0, 32)}...`)
 		}
-	})
-
-vorpal
-	.command('login <username> <password> [host]', 'Login to iCure')
-	.action(async function (this: CommandInstance, args: Args) {
-		options.username = args.username
-		options.password = args.password
-		args.host && (options.host = args.host)
-		;({
-			healthcarePartyApi,
-			cryptoApi,
-			userApi,
-			healthcareElementApi,
-			invoiceApi,
-			patientApi,
-			contactApi,
-		} = Api(options.host, options.username, options.password, crypto))
-		healthcarePartyApi.getCurrentHealthcareParty().then((hcp) => {
-			hcpartyId = hcp.id
-		})
-	})
-
-vorpal
-	.command('pki <hcpId> <key>', 'Private Key Import')
-	.action(async function (this: CommandInstance, args: Args) {
-		const hcpId = args.hcpId
-		const key = args.key
-
-		await cryptoApi.loadKeyPairsAsTextInBrowserLocalStorage(hcpId, hex2ua(key))
-		if (
-			await cryptoApi.checkPrivateKeyValidity(
-				await healthcarePartyApi.getHealthcareParty(hcpId)
-			)
-		) {
-			this.log('Key is valid')
-		} else {
-			this.log('Key is invalid')
-		}
-	})
-
-vorpal.command('lpkis', 'List Private Keys').action(async function (this: CommandInstance) {
-	const users = (await userApi.listUsers(undefined, undefined, undefined))?.rows || []
-	await users.reduce(async (p: Promise<any>, u: User) => {
-		await p
-		if (u.healthcarePartyId) {
-			const hcp = await healthcarePartyApi.getHealthcareParty(u.healthcarePartyId)
-			try {
-				if (hcp.publicKey && (await cryptoApi.checkPrivateKeyValidity(hcp))) {
-					this.log(`${colors.green('√')} ${hcp.id}: ${hcp.firstName} ${hcp.lastName}`)
-				} else {
-					this.log(`${colors.red('X')} ${hcp.id}: ${hcp.firstName} ${hcp.lastName}`)
-				}
-			} catch (e) {
-				this.log(`X ${hcp.id}: ${hcp.firstName} ${hcp.lastName}`)
-			}
-		}
-	}, Promise.resolve())
-})
+	} else {
+		log(pc.red('No key pairs available'))
+	}
+}
 
 function convertVariable(text: string): number | string {
 	if (text.endsWith('m')) {
-		return Number(
-			format(addMonths(new Date(), -Number(text.substr(0, text.length - 1))), 'yyyyMMdd')
-		)
+		return Number(format(addMonths(new Date(), -Number(text.slice(0, -1))), 'yyyyMMdd'))
 	} else if (text.endsWith('y')) {
-		return Number(
-			format(addYears(new Date(), -Number(text.substr(0, text.length - 1))), 'yyyyMMdd')
-		)
+		return Number(format(addYears(new Date(), -Number(text.slice(0, -1))), 'yyyyMMdd'))
 	}
 	return text
 }
 
-async function executeInput(cmd: CommandInstance, input: string, path?: string) {
+async function executeInput(input: string, exportPath?: string, deferPolicy?: DeferralPolicy) {
 	const start = +new Date()
-	const hcp = await healthcarePartyApi.getCurrentHealthcareParty()
+	const hcp = await api.healthcarePartyApi.getCurrentHealthcareParty()
 	if (!hcp) {
 		console.error('You are not logged in')
 		return
@@ -156,37 +164,36 @@ async function executeInput(cmd: CommandInstance, input: string, path?: string) 
 	let parsedInput
 	try {
 		parsedInput = parser.parse(input, { hcpId: hcp.parentId || hcp.id })
-	} catch (e) {
-		e.location &&
-			e.location.start.column &&
-			cmd.log(' '.repeat(e.location.start.column + 14) + colors.red('↑'))
-		cmd.log(
-			colors.red(
+	} catch (e: unknown) {
+		const err = e as PeggyParseError
+		err.location &&
+			err.location.start.column &&
+			log(' '.repeat(err.location.start.column + 14) + pc.red('↑'))
+		log(
+			pc.red(
 				`Cannot parse : ${
-					e.location !== undefined
+					err.location !== undefined
 						? 'Line ' +
-						  e.location.start.line +
-						  ', column ' +
-						  e.location.start.column +
-						  ': ' +
-						  e.message
-						: e.message
-				}`
-			)
+							err.location.start.line +
+							', column ' +
+							err.location.start.column +
+							': ' +
+							err.message
+						: err.message
+				}`,
+			),
 		)
 		return
 	}
 	if (debug) console.log('Filter pre-rewriting: ' + JSON.stringify(parsedInput))
 
-	const vars: { [index: string]: any } = {}
+	const vars: Record<string, string | number> = {}
 	forEachDeep(parsedInput, (obj) => {
-		if (
-			isObject(obj) &&
-			(obj as any).variable &&
-			(obj as any).variable.startsWith &&
-			(obj as any).variable.startsWith('$')
-		) {
-			vars[(obj as any).variable.substr(1)] = ''
+		if (isObject(obj)) {
+			const node = obj as Record<string, unknown>
+			if (typeof node.variable === 'string' && node.variable.startsWith('$')) {
+				vars[node.variable.slice(1)] = ''
+			}
 		}
 	})
 
@@ -195,294 +202,368 @@ async function executeInput(cmd: CommandInstance, input: string, path?: string) 
 		if (existingVariables.has(v)) {
 			vars[v] = convertVariable(existingVariables.get(v) || '')
 		} else {
-			vars[v] = convertVariable(
-				(await cmd.prompt({ type: 'input', message: `${v} : `, name: 'value' })).value
-			)
+			vars[v] = convertVariable(await question(`${v} : `))
 		}
 		console.log(vars[v])
 	}, Promise.resolve())
 
 	const finalResult = await filter(
-		mapDeep(parsedInput, (obj) =>
-			isObject(obj) &&
-			(obj as any).variable &&
-			(obj as any).variable.startsWith &&
-			(obj as any).variable.startsWith('$')
-				? vars[(obj as any).variable.substr(1)]
-				: obj
-		),
-		{
-			healthcarePartyApi,
-			cryptoApi,
-			userApi,
-			contactApi,
-			healthcareElementApi,
-			invoiceApi,
-			patientApi,
-		},
+		mapDeep(parsedInput, (obj) => {
+			if (isObject(obj)) {
+				const node = obj as Record<string, unknown>
+				if (typeof node.variable === 'string' && node.variable.startsWith('$')) {
+					return vars[node.variable.slice(1)]
+				}
+			}
+			return obj
+		}),
+		api,
 		hcpartyId,
-		debug
+		debug,
+		deferPolicy,
 	)
 
-	if (path && finalResult.rows) {
-		path.endsWith('.xls') || path.endsWith('.xlsx')
-			? writeExcel(finalResult.rows, path.replace(/\.xls$/, '.xlsx'))
-			: fs.writeFileSync(path, JSON.stringify(finalResult.rows, undefined, ' '))
+	if (exportPath && finalResult.rows) {
+		exportPath.endsWith('.xls') || exportPath.endsWith('.xlsx')
+			? writeExcel(
+					finalResult.rows as Array<Record<string, unknown>>,
+					exportPath.replace(/\.xls$/, '.xlsx'),
+				)
+			: fs.writeFileSync(exportPath, JSON.stringify(finalResult.rows, undefined, ' '))
 	}
 
-	cmd.log((JSON as any).colorStringify(finalResult.rows, null, '\t'))
+	log(inspect(finalResult.rows, { colors: true, depth: null }))
 	const stop = +new Date()
-	cmd.log(`${(finalResult.rows || []).length} items returned in ${stop - start} ms`)
+	log(`${(finalResult.rows || []).length} items returned in ${stop - start} ms`)
 }
 
-vorpal
-	.command(
-		'query [input...]',
-		'Query iCure. A query typically has the PAT[...] structure. Complex queries should be enclosed between single quotes. Variable ($var) can be used instead of values.'
-	)
-	.action(async function (this: CommandInstance, args: Args) {
-		try {
-			const input = args.input.join(' ')
-			this.log('Parsing query: ' + input)
-			latestQuery = input
-
-			await executeInput(this, input)
-		} catch (e) {
-			console.error('Unexpected error', e)
-		}
-	})
-
-vorpal
-	.command('export <path> [input...]', 'Export executed query to file (.xls(x) or .json)')
-	.action(async function (this: CommandInstance, args: Args) {
-		try {
-			const input = args.input.join(' ')
-			this.log('Parsing query: ' + input)
-			latestQuery = input
-
-			await executeInput(this, input, args.path)
-		} catch (e) {
-			console.error('Unexpected error', e)
-		}
-	})
-
-vorpal
-	.command(
-		'save <name> <description> [input...]',
-		'Save iCure query to queries repository. In case no query is provided the latest executed query is saved.'
-	)
-	.action(async function (this: CommandInstance, args: Args) {
-		try {
-			const input = (args.input && args.input.length && args.input.join(' ')) || latestQuery
-
-			if (options.repoHost) {
-				const existing: any = await (
-					await fetch(`${options.repoHost}/${args.name}`, {
-						method: 'GET',
-						headers: options.repoHeader,
-						redirect: 'follow',
-					})
-				).json()
-				if (
-					existing.error ||
-					(
-						await this.prompt({
-							type: 'confirm',
-							message: `${args.name} already exists, do you want to overwrite it ?`,
-							name: 'confirmation',
-						})
-					).confirmation
-				) {
-					await fetch(`${options.repoHost}/${args.name}`, {
-						method: 'PUT',
-						headers: options.repoHeader,
-						redirect: 'follow',
-						body: JSON.stringify(
-							Object.assign(
-								{ _id: args.name, description: args.description, query: input },
-								existing ? { _rev: existing._rev } : {}
-							)
-						),
-					})
-				}
-			} else {
-				this.log(
-					colors.red('You are not logged to the repository. Use repo command first.')
-				)
-			}
-		} catch (e) {
-			console.error('Unexpected error', e)
-		}
-	})
-
-vorpal
-	.command('ls', 'List iCure queries on repository server')
-	.action(async function (this: CommandInstance) {
-		try {
-			if (options.repoHost) {
-				const existing: any = await (
-					await fetch(`${options.repoHost}/_all_docs`, {
-						method: 'GET',
-						headers: options.repoHeader,
-						redirect: 'follow',
-					})
-				).json()
-				if (existing && existing.rows) {
-					this.log(colors.yellow(existing.rows.map((r: any) => r.id).join('\n')))
-				}
-			} else {
-				this.log(
-					colors.red('You are not logged to the repository. Use repo command first.')
-				)
-			}
-		} catch (e) {
-			console.error('Unexpected error', e)
-		}
-	})
-
-vorpal
-	.command('loadexec <name>', 'Load and execute iCure query from repository server')
-	.autocomplete({
-		data: () =>
-			!options.repoHost
-				? Promise.resolve([])
-				: fetch(`${options.repoHost}/_all_docs`, {
-						method: 'GET',
-						headers: options.repoHeader,
-						redirect: 'follow',
-				  })
-						.then((res) => res.json())
-						.then((commands) => {
-							return commands.rows.map((r: any) => r.id)
-						}),
-	})
-	.action(async function (this: CommandInstance, args: Args) {
-		try {
-			if (options.repoHost) {
-				const existing: any = await (
-					await fetch(`${options.repoHost}/${args.name}`, {
-						method: 'GET',
-						headers: options.repoHeader,
-						redirect: 'follow',
-					})
-				).json()
-				if (existing && existing.query) {
-					await executeInput(this, existing.query)
-				}
-			} else {
-				this.log(
-					colors.red('You are not logged to the repository. Use repo command first.')
-				)
-			}
-		} catch (e) {
-			console.error('Unexpected error', e)
-		}
-	})
-
-vorpal
-	.command(
-		'loadexport <name> <path>',
-		'Load, execute and export to file (.xls(x) or .json) iCure query from repository server'
-	)
-	.autocomplete({
-		data: () =>
-			!options.repoHost
-				? Promise.resolve([])
-				: fetch(`${options.repoHost}/_all_docs`, {
-						method: 'GET',
-						headers: options.repoHeader,
-						redirect: 'follow',
-				  })
-						.then((res) => res.json())
-						.then((commands) => {
-							return commands.rows.map((r: any) => r.id)
-						}),
-	})
-	.action(async function (this: CommandInstance, args: Args) {
-		try {
-			if (options.repoHost) {
-				const existing: any = await (
-					await fetch(`${options.repoHost}/${args.name}`, {
-						method: 'GET',
-						headers: options.repoHeader,
-						redirect: 'follow',
-					})
-				).json()
-				if (existing && existing.query) {
-					await executeInput(this, existing.query, args.path)
-				}
-			} else {
-				this.log(
-					colors.red('You are not logged to the repository. Use repo command first.')
-				)
-			}
-		} catch (e) {
-			console.error('Unexpected error', e)
-		}
-	})
-
-vorpal.command('whoami', 'Logged user info').action(async function (this: CommandInstance) {
-	this.log((await userApi.getCurrentUser()).login + '@' + options.host)
-})
-
-// TODO PAT[] (no condition) ?
-// TODO PAT[age == 15] ? (maybe useless)
-// TODO | max(dateOfBirth) -> select name? who is the oldest patient?
-vorpal.command('ex', 'Show example queries').action(async function (this: CommandInstance) {
-	this.log("query 'PAT[age<2y]'")
-	this.log("query 'PAT[age<50y & gender == male] | count'")
-	this.log("query 'PAT[age>50y] | min(dateOfBirth)'")
-	this.log("query 'PAT[age>75y - gender == female] | select(firstName, lastName, gender)'")
-	this.log("query 'SVC[ICPC == T89 & :CD-ITEM == diagnosis]'")
-	this.log(
-		"query 'PAT[(age>45y & SVC[ICPC == T89 & :CD-ITEM == diagnosis]) - SVC[LOINC == Hba1c & :CD-ITEM == diagnosis]]'"
-	)
-	this.log(
-		"query 'PAT[age>25y & age<26y - SVC[CISP == X75{19500101 -> 20000101} & :CD-ITEM == diagnosis]]'"
-	)
-	this.log(
-		"query 'PAT[age>25y & age<26y - (SVC[CISP == X75{<3y} & :CD-ITEM == diagnosis] | HE[CISP == X75{<3y}]) - SVC[CISP == X37.002] - SVC[CISP == X37.003]]'"
-	)
-	this.log(
-		"query 'PAT[age>45y & SVC[ICPC == T89{>6m} & :CD-ITEM == diagnosis | ICPC == T90{<2y} & :CD-ITEM == diagnosis]] | select(lastName)'"
-	)
-})
-
-vorpal
-	.command('grammar', 'Print the grammar used to parse queries')
-	.action(async function (this: CommandInstance) {
-		const grammar = fs.readFileSync(
-			path.resolve(__dirname, '../grammar/icure-reporting-parser.pegjs'),
-			'utf8'
+function parseDeferFlag(args: string[]): {
+	remaining: string[]
+	deferPolicy?: DeferralPolicy
+} {
+	const idx = args.indexOf('--defer')
+	if (idx === -1) return { remaining: args }
+	if (idx + 1 >= args.length) {
+		log(
+			pc.red(
+				'--defer requires a comma-separated list of policies: active,gender,age,all-patients',
+			),
 		)
-		this.log(grammar)
-	})
+		return { remaining: args.filter((_, i) => i !== idx) }
+	}
+	const policyNames = args[idx + 1].split(',')
+	const remaining = args.filter((_, i) => i !== idx && i !== idx + 1)
+	return { remaining, deferPolicy: composePolicies(policyNames) }
+}
 
-vorpal
-	.command('var [input...]', 'Set a variable, e.g. var x = 5y')
-	.action(async function (this: CommandInstance, args: Args) {
-		const input: string = args.input.join(' ').replace(/'/g, '') // remove single quotes as a workaround to a vorpal bug
-		const elements = input.split(';')
-		elements.forEach((element) => {
-			if (element.trim().length > 0) {
-				const cut = element.trim().split('=')
-				if (cut.length === 2) {
-					const variable = cut[0].trim()
-					const value = cut[1].trim()
-					this.log(`Setting variable $${variable} to ${value}`)
-					existingVariables.set(variable, value)
-				} else {
-					this.log('Invalid element: ' + element)
-				}
+async function cmdQuery(args: string[]) {
+	const { remaining, deferPolicy } = parseDeferFlag(args)
+	const input = remaining.join(' ')
+	if (!input) {
+		log(pc.red('Usage: query [--defer active,gender,age] <expression>'))
+		return
+	}
+	log('Parsing query: ' + input)
+	latestQuery = input
+	await executeInput(input, undefined, deferPolicy)
+}
+
+async function cmdExport(args: string[]) {
+	const { remaining, deferPolicy } = parseDeferFlag(args)
+	const [exportPath, ...rest] = remaining
+	if (!exportPath || rest.length === 0) {
+		log(pc.red('Usage: export [--defer active,gender,age] <path> <expression>'))
+		return
+	}
+	const input = rest.join(' ')
+	log('Parsing query: ' + input)
+	latestQuery = input
+	await executeInput(input, exportPath, deferPolicy)
+}
+
+async function cmdSave(args: string[]) {
+	const [name, description, ...rest] = args
+	if (!name || !description) {
+		log(pc.red('Usage: save <name> <description> [expression]'))
+		return
+	}
+	const input = (rest.length > 0 && rest.join(' ')) || latestQuery
+	if (!input) {
+		log(pc.red('No query to save. Run a query first or provide one.'))
+		return
+	}
+
+	if (options.repoHost) {
+		const existing = (await (
+			await fetch(`${options.repoHost}/${name}`, {
+				method: 'GET',
+				headers: options.repoHeader,
+				redirect: 'follow',
+			})
+		).json()) as RepoDocument
+		if (existing.error) {
+			await fetch(`${options.repoHost}/${name}`, {
+				method: 'PUT',
+				headers: options.repoHeader,
+				redirect: 'follow',
+				body: JSON.stringify(
+					Object.assign(
+						{ _id: name, description, query: input },
+						existing ? { _rev: existing._rev } : {},
+					),
+				),
+			})
+		} else {
+			const answer = await question(
+				`${name} already exists, do you want to overwrite it ? (y/n) `,
+			)
+			if (answer.toLowerCase().startsWith('y')) {
+				await fetch(`${options.repoHost}/${name}`, {
+					method: 'PUT',
+					headers: options.repoHeader,
+					redirect: 'follow',
+					body: JSON.stringify(
+						Object.assign(
+							{ _id: name, description, query: input },
+							existing ? { _rev: existing._rev } : {},
+						),
+					),
+				})
 			}
-		})
+		}
+	} else {
+		log(pc.red('You are not logged to the repository. Use repo command first.'))
+	}
+}
+
+async function cmdLs() {
+	if (options.repoHost) {
+		const existing = (await (
+			await fetch(`${options.repoHost}/_all_docs`, {
+				method: 'GET',
+				headers: options.repoHeader,
+				redirect: 'follow',
+			})
+		).json()) as RepoAllDocsResponse
+		if (existing && existing.rows) {
+			log(pc.yellow(existing.rows.map((r) => r.id).join('\n')))
+		}
+	} else {
+		log(pc.red('You are not logged to the repository. Use repo command first.'))
+	}
+}
+
+async function cmdLoadexec(args: string[]) {
+	const [name] = args
+	if (!name) {
+		log(pc.red('Usage: loadexec <name>'))
+		return
+	}
+	if (options.repoHost) {
+		const existing = (await (
+			await fetch(`${options.repoHost}/${name}`, {
+				method: 'GET',
+				headers: options.repoHeader,
+				redirect: 'follow',
+			})
+		).json()) as RepoDocument
+		if (existing && existing.query) {
+			await executeInput(existing.query)
+		}
+	} else {
+		log(pc.red('You are not logged to the repository. Use repo command first.'))
+	}
+}
+
+async function cmdLoadexport(args: string[]) {
+	const [name, exportPath] = args
+	if (!name || !exportPath) {
+		log(pc.red('Usage: loadexport <name> <path>'))
+		return
+	}
+	if (options.repoHost) {
+		const existing = (await (
+			await fetch(`${options.repoHost}/${name}`, {
+				method: 'GET',
+				headers: options.repoHeader,
+				redirect: 'follow',
+			})
+		).json()) as RepoDocument
+		if (existing && existing.query) {
+			await executeInput(existing.query, exportPath)
+		}
+	} else {
+		log(pc.red('You are not logged to the repository. Use repo command first.'))
+	}
+}
+
+async function cmdWhoami() {
+	log((await api.userApi.getCurrentUser()).login + '@' + options.host)
+}
+
+function cmdEx() {
+	log("query 'PAT[age<2y]'")
+	log("query 'PAT[age<50y & gender == male] | count'")
+	log("query 'PAT[age>50y] | min(dateOfBirth)'")
+	log("query 'PAT[age>75y - gender == female] | select(firstName, lastName, gender)'")
+	log("query 'SVC[ICPC == T89 & :CD-ITEM == diagnosis]'")
+	log(
+		"query 'PAT[(age>45y & SVC[ICPC == T89 & :CD-ITEM == diagnosis]) - SVC[LOINC == Hba1c & :CD-ITEM == diagnosis]]'",
+	)
+	log(
+		"query 'PAT[age>25y & age<26y - SVC[CISP == X75{19500101 -> 20000101} & :CD-ITEM == diagnosis]]'",
+	)
+	log(
+		"query 'PAT[age>25y & age<26y - (SVC[CISP == X75{<3y} & :CD-ITEM == diagnosis] | HE[CISP == X75{<3y}]) - SVC[CISP == X37.002] - SVC[CISP == X37.003]]'",
+	)
+	log(
+		"query 'PAT[age>45y & SVC[ICPC == T89{>6m} & :CD-ITEM == diagnosis | ICPC == T90{<2y} & :CD-ITEM == diagnosis]] | select(lastName)'",
+	)
+}
+
+function cmdGrammar() {
+	const g = fs.readFileSync(
+		path.resolve(__dirname, '../grammar/icure-reporting-parser.peggy'),
+		'utf8',
+	)
+	log(g)
+}
+
+function cmdVar(args: string[]) {
+	const input = args.join(' ').replace(/'/g, '')
+	const elements = input.split(';')
+	elements.forEach((element) => {
+		if (element.trim().length > 0) {
+			const cut = element.trim().split('=')
+			if (cut.length === 2) {
+				const variable = cut[0].trim()
+				const value = cut[1].trim()
+				log(`Setting variable $${variable} to ${value}`)
+				existingVariables.set(variable, value)
+			} else {
+				log('Invalid element: ' + element)
+			}
+		}
+	})
+}
+
+function cmdVariables() {
+	const output = Array.from(existingVariables).map(([key, value]) => key + '=' + value)
+	log('var ' + output.join(';'))
+}
+
+function printHelp() {
+	log('Available commands:')
+	log('  login <username> <password> [host]  Login to iCure')
+	log('  repo <username> <password> [host]   Login to Queries repository')
+	log('  pki <hcpId> <key>                   Private Key Import')
+	log('  lpkis                               List Private Keys')
+	log('  query <expression>                  Query iCure')
+	log('  export <path> <expression>          Export query results to file (.xls(x) or .json)')
+	log('  save <name> <desc> [expression]     Save query to repository')
+	log('  ls                                  List queries on repository server')
+	log('  loadexec <name>                     Load and execute query from repository')
+	log('  loadexport <name> <path>            Load, execute and export query from repository')
+	log('  whoami                              Logged user info')
+	log('  ex                                  Show example queries')
+	log('  grammar                             Print the query grammar')
+	log('  var <input>                         Set a variable, e.g. var x = 5y')
+	log('  variables                           Print existing variables')
+	log('  help                                Show this help')
+	log('  exit                                Exit the application')
+}
+
+// --- Command dispatch ---
+
+const commands: Record<string, (args: string[]) => Promise<void> | void> = {
+	repo: cmdRepo,
+	login: cmdLogin,
+	pki: cmdPki,
+	lpkis: () => cmdLpkis(),
+	query: cmdQuery,
+	export: cmdExport,
+	save: cmdSave,
+	ls: () => cmdLs(),
+	loadexec: cmdLoadexec,
+	loadexport: cmdLoadexport,
+	whoami: () => cmdWhoami(),
+	ex: () => cmdEx(),
+	grammar: () => cmdGrammar(),
+	var: cmdVar,
+	variables: () => cmdVariables(),
+	help: () => printHelp(),
+}
+
+function parseCommandLine(line: string): { command: string; args: string[] } {
+	const trimmed = line.trim()
+	if (!trimmed) return { command: '', args: [] }
+
+	// Handle quoted arguments (single and double quotes)
+	const parts: string[] = []
+	let current = ''
+	let inSingle = false
+	let inDouble = false
+
+	for (let i = 0; i < trimmed.length; i++) {
+		const ch = trimmed[i]
+		if (ch === "'" && !inDouble) {
+			inSingle = !inSingle
+		} else if (ch === '"' && !inSingle) {
+			inDouble = !inDouble
+		} else if (ch === ' ' && !inSingle && !inDouble) {
+			if (current) {
+				parts.push(current)
+				current = ''
+			}
+		} else {
+			current += ch
+		}
+	}
+	if (current) parts.push(current)
+
+	const [command, ...args] = parts
+	return { command: command.toLowerCase(), args }
+}
+
+async function main() {
+	rl = readline.createInterface({
+		input: process.stdin,
+		output: process.stdout,
+		history: [],
+		terminal: true,
 	})
 
-vorpal
-	.command('variables', 'Print existing variables')
-	.action(async function (this: CommandInstance) {
-		const output = Array.from(existingVariables).map(([key, value]) => key + '=' + value)
-		this.log('var ' + output.join(';'))
-	})
+	printHelp()
+	log('')
 
-vorpal.delimiter('icure-reporting$').history('icrprt').show()
+	while (true) {
+		let line: string
+		try {
+			line = await rl.question('icure-reporting$ ')
+		} catch {
+			// EOF or closed
+			break
+		}
+
+		const { command, args } = parseCommandLine(line)
+		if (!command) continue
+		if (command === 'exit' || command === 'quit') break
+
+		const handler = commands[command]
+		if (!handler) {
+			log(pc.red(`Unknown command: ${command}. Type 'help' for available commands.`))
+			continue
+		}
+
+		try {
+			await handler(args)
+		} catch (e) {
+			console.error('Unexpected error', e)
+		}
+	}
+
+	rl.close()
+	process.exit(0)
+}
+
+main()

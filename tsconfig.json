@@ -1,32 +1,22 @@
 {
 	"compilerOptions": {
-		"target": "es6",
-		"module": "commonjs",
-		// Use esnext to enable lazy loading
-		"moduleResolution": "node",
-		"experimentalDecorators": true,
-		//
-		"emitDecoratorMetadata": true,
-		/* Strict Type-Checking Options */
+		"target": "es2022",
+		"module": "node16",
+		"moduleResolution": "node16",
 		"strict": true,
-		/* Enable all strict type-checking options. */
 		"strictNullChecks": true,
 		"noImplicitThis": true,
-		// "noImplicitAny": true,
 		"allowSyntheticDefaultImports": true,
 		"lib": [
-			"es2017",
-			"es6",
-			"es5",
-			"dom"
+			"es2022"
 		],
 		"sourceMap": true,
 		"declaration": true,
-		/* Generates corresponding '.d.ts' file. */
 		"outDir": "./dist",
-		"baseUrl": "./"
+		"baseUrl": "./",
+		"skipLibCheck": true
 	},
-	"files": [
-		"./src/icure-reporting.ts"
+	"include": [
+		"src/**/*.ts"
 	]
 }
