@@ -40,7 +40,7 @@
 		"lodash": "^4.17.15",
 		"peggy": "^5.1.0",
 		"picocolors": "^1.1.1",
-		"xlsx": "^0.15.1"
+		"xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
 	},
 	"prettier": {
 		"semi": false,
