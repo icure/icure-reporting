@@ -166,9 +166,9 @@ __metadata:
   languageName: node
   linkType: hard
 
-"@icure/api@npm:^8.6.14":
-  version: 8.6.14
-  resolution: "@icure/api@npm:8.6.14"
+"@icure/api@npm:^8.6.19":
+  version: 8.6.19
+  resolution: "@icure/api@npm:8.6.19"
   dependencies:
     async-mutex: "npm:^0.5.0"
     big-integer: "npm:^1.6.52"
@@ -181,7 +181,7 @@ __metadata:
     uuid: "npm:^8.3.2"
     uuid-encoder: "npm:^1.1.0"
     ws: "npm:^8.18.0"
-  checksum: 10c0/1ca022fb8380aa7897248c4fa87be1d9b828ca46627c558bdfdf746377ea5339a8d5e65aa2ea0cfbf15eb4563ea84c3937dbc2a3038dc8e8ec42fcf60550fd5b
+  checksum: 10c0/bf083231f074d4328441658aa6302c575085375935a6206381bbc7426824ffdad2c04b0c9cde43a79d326f688cb3c88c9609c0a83513caa304404adb144ae893
   languageName: node
   linkType: hard
 
@@ -189,8 +189,7 @@ __metadata:
   version: 0.0.0-use.local
   resolution: "@icure/reporting@workspace:."
   dependencies:
-    "@icure/api": "npm:^8.6.14"
-    "@types/lodash": "npm:^4.14.168"
+    "@icure/api": "npm:^8.6.19"
     "@types/node": "npm:^22.19.17"
     "@typescript-eslint/eslint-plugin": "npm:^8.58.0"
     "@typescript-eslint/parser": "npm:^8.58.0"
@@ -198,7 +197,6 @@ __metadata:
     eslint: "npm:^9.39.4"
     eslint-config-prettier: "npm:^10.1.8"
     eslint-plugin-prettier: "npm:^5.5.5"
-    lodash: "npm:^4.17.15"
     peggy: "npm:^5.1.0"
     picocolors: "npm:^1.1.1"
     prettier: "npm:^3.8.1"
@@ -451,13 +449,6 @@ __metadata:
   version: 7.0.15
   resolution: "@types/json-schema@npm:7.0.15"
   checksum: 10c0/a996a745e6c5d60292f36731dd41341339d4eeed8180bb09226e5c8d23759067692b1d88e5d91d72ee83dfc00d3aca8e7bd43ea120516c17922cbcb7c3e252db
-  languageName: node
-  linkType: hard
-
-"@types/lodash@npm:^4.14.168":
-  version: 4.17.24
-  resolution: "@types/lodash@npm:4.17.24"
-  checksum: 10c0/b72f60d4daacdad1fa643edb3faba204c02a01eb1ac00a83ff73496a6d236fc55e459c06106e8ced42277dba932d087d8fc090f8de4ef590d3f91e6d6f7ce85a
   languageName: node
   linkType: hard
 
@@ -1583,7 +1574,7 @@ __metadata:
   languageName: node
   linkType: hard
 
-"lodash@npm:^4.17.15, lodash@npm:^4.17.21":
+"lodash@npm:^4.17.21":
   version: 4.18.1
   resolution: "lodash@npm:4.18.1"
   checksum: 10c0/757228fc68805c59789e82185135cf85f05d0b2d3d54631d680ca79ec21944ec8314d4533639a14b8bcfbd97a517e78960933041a5af17ecb693ec6eecb99a27

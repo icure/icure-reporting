@@ -5,12 +5,133 @@ import * as nodeCrypto from 'node:crypto'
 import * as peggy from 'peggy'
 import * as fs from 'node:fs'
 import * as path from 'node:path'
-import { isObject } from 'lodash'
 
 import { filter, composePolicies } from '../src/filters.js'
 import { forEachDeep } from '../src/reduceDeep.js'
 import { createCryptoStrategies, type KeyMap } from '../src/crypto-strategies.js'
 import { FileStorageFacade, FileKeyStorageFacade } from '../src/local-storage-shim.js'
+
+// --- Timing instrumentation ---
+
+interface RequestTiming {
+	method: string
+	url: string
+	startMs: number
+	endMs: number
+	durationMs: number
+	responseBytes: number
+	serverHeaders: Record<string, string>
+}
+
+class TimingCollector {
+	entries: RequestTiming[] = []
+
+	clear() {
+		this.entries = []
+	}
+
+	/** Create an instrumented fetch that records timing and response size for every request. */
+	createFetch(): typeof globalThis.fetch {
+		const self = this
+		return async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+			const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+			const method = init?.method ?? 'GET'
+			const startMs = performance.now()
+			const response = await globalThis.fetch(input, init)
+			const endMs = performance.now()
+
+			const serverHeaders: Record<string, string> = {}
+			response.headers.forEach((value, key) => {
+				const lk = key.toLowerCase()
+				if (
+					lk.startsWith('server-timing') ||
+					lk.startsWith('x-client-time') ||
+					lk.startsWith('x-filter-timing') ||
+					lk.startsWith('x-request-id') ||
+					lk === 'x-execution-time'
+				) {
+					serverHeaders[key] = value
+				}
+			})
+
+			// Capture response body size by consuming a clone
+			const clone = response.clone()
+			const bodyBytes = await clone.arrayBuffer()
+			const responseBytes = bodyBytes.byteLength
+
+			self.entries.push({
+				method,
+				url,
+				startMs,
+				endMs,
+				durationMs: endMs - startMs,
+				responseBytes,
+				serverHeaders,
+			})
+
+			return response
+		}
+	}
+
+	/** Format a human-readable byte size. */
+	private formatBytes(bytes: number): string {
+		if (bytes < 1024) return `${bytes} B`
+		if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+		return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+	}
+
+	/** Format a timing breakdown for display. */
+	formatBreakdown(label: string, totalMs: number): string {
+		const lines: string[] = []
+		const totalBytes = this.entries.reduce((s, e) => s + e.responseBytes, 0)
+
+		lines.push(`\n--- Timing breakdown: ${label} ---`)
+		lines.push(`Total wall time: ${totalMs.toFixed(0)}ms`)
+		lines.push(`HTTP requests: ${this.entries.length}`)
+		lines.push(`Downloaded: ${this.formatBytes(totalBytes)}`)
+
+		// Group by URL path (strip host + query for readability)
+		const byPath = new Map<string, RequestTiming[]>()
+		for (const e of this.entries) {
+			let pathKey: string
+			try {
+				const u = new URL(e.url)
+				pathKey = `${e.method} ${u.pathname}`
+			} catch {
+				pathKey = `${e.method} ${e.url}`
+			}
+			if (!byPath.has(pathKey)) byPath.set(pathKey, [])
+			byPath.get(pathKey)!.push(e)
+		}
+
+		lines.push('')
+		for (const [pathKey, entries] of byPath) {
+			const totalForPath = entries.reduce((s, e) => s + e.durationMs, 0)
+			const bytesForPath = entries.reduce((s, e) => s + e.responseBytes, 0)
+			if (entries.length === 1) {
+				lines.push(
+					`  ${pathKey}: ${entries[0].durationMs.toFixed(0)}ms, ${this.formatBytes(entries[0].responseBytes)}`,
+				)
+			} else {
+				lines.push(
+					`  ${pathKey}: ${entries.length}x, total=${totalForPath.toFixed(0)}ms, avg=${(totalForPath / entries.length).toFixed(0)}ms, ${this.formatBytes(bytesForPath)}`,
+				)
+			}
+			// Show server-side headers if present
+			for (const e of entries) {
+				const hdrs = Object.entries(e.serverHeaders)
+				if (hdrs.length > 0) {
+					for (const [k, v] of hdrs) {
+						lines.push(`    ${k}: ${v}`)
+					}
+				}
+			}
+		}
+
+		lines.push('---\n')
+		return lines.join('\n')
+	}
+}
 
 // Load .env file (Node 22 built-in)
 try {
@@ -40,9 +161,10 @@ const parser = peggy.generate(grammar)
 describe.skipIf(!hasCredentials)('E2E — query execution', () => {
 	let api: Apis
 	let hcpartyId: string
+	const timing = new TimingCollector()
 
 	beforeAll(async () => {
-		const host = ICURE_HOST || 'https://qa.icure.cloud'
+		const host = ICURE_HOST || 'https://nightly.icure.cloud'
 		const storage = new FileStorageFacade()
 		const keyStorage = new FileKeyStorageFacade()
 		const keyMap: KeyMap = new Map()
@@ -84,13 +206,13 @@ describe.skipIf(!hasCredentials)('E2E — query execution', () => {
 			})
 		}
 
-		// Initialize API (same as cmdLogin)
+		// Initialize API with instrumented fetch for timing collection
 		api = await IcureApi.initialise(
 			host,
 			{ username: ICURE_USERNAME!, password: ICURE_PASSWORD! },
 			createCryptoStrategies(keyMap),
 			nodeCrypto.webcrypto as any,
-			undefined,
+			timing.createFetch(),
 			{ storage, keyStorage },
 		)
 
@@ -107,7 +229,7 @@ describe.skipIf(!hasCredentials)('E2E — query execution', () => {
 		const vars: string[] = []
 		forEachDeep(parsedInput, (obj) => {
 			if (
-				isObject(obj) &&
+				obj != null && typeof obj === 'object' &&
 				(obj as any).variable &&
 				(obj as any).variable.startsWith?.('$')
 			) {
@@ -120,7 +242,16 @@ describe.skipIf(!hasCredentials)('E2E — query execution', () => {
 
 		const deferPolicy = deferPolicies ? composePolicies(deferPolicies) : undefined
 
-		return filter(parsedInput, api, hcpartyId, false, deferPolicy)
+		timing.clear()
+		const wallStart = performance.now()
+		const result = await filter(parsedInput, api, hcpartyId, false, deferPolicy)
+		const wallEnd = performance.now()
+
+		// Display timing breakdown for this query
+		const shortInput = input.length > 80 ? input.slice(0, 77) + '...' : input
+		console.log(timing.formatBreakdown(shortInput, wallEnd - wallStart))
+
+		return result
 	}
 
 	// --- Patient queries ---

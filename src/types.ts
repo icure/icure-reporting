@@ -9,6 +9,7 @@ export type IcureEntity = Patient | Contact | Service | HealthElement | Invoice
 
 interface FilterNodeBase {
 	$type: string
+	desc?: string
 	healthcarePartyId?: string
 }
 
@@ -103,6 +104,64 @@ export interface ContactByHcPartyTagCodeDateFilter extends FilterNodeBase {
 	endServiceValueDate?: string
 }
 
+export interface ServiceBySecretForeignKeys extends FilterNodeBase {
+	$type: 'ServiceBySecretForeignKeys'
+	patientSecretForeignKeys?: string[]
+}
+
+export interface ServiceByHcPartyCodesFilter extends FilterNodeBase {
+	$type: 'ServiceByHcPartyCodesFilter'
+	codeCodes: Record<string, string[]>
+	startValueDate?: number
+	endValueDate?: number
+}
+
+export interface ServiceByHcPartyTagCodesFilter extends FilterNodeBase {
+	$type: 'ServiceByHcPartyTagCodesFilter'
+	tagCodes: Record<string, string[]>
+	startValueDate?: number
+	endValueDate?: number
+}
+
+export interface ServiceByHcPartyPatientCodesFilter extends FilterNodeBase {
+	$type: 'ServiceByHcPartyPatientCodesFilter'
+	patientSecretForeignKeys: string[]
+	codeCodes: Record<string, string[]>
+	startValueDate?: number
+	endValueDate?: number
+}
+
+export interface ServiceByHcPartyPatientTagCodesFilter extends FilterNodeBase {
+	$type: 'ServiceByHcPartyPatientTagCodesFilter'
+	patientSecretForeignKeys: string[]
+	tagCodes: Record<string, string[]>
+	startValueDate?: number
+	endValueDate?: number
+}
+
+export interface HealthElementByHcPartySecretForeignKeysFilter extends FilterNodeBase {
+	$type: 'HealthElementByHcPartySecretForeignKeysFilter'
+	patientSecretForeignKeys?: string[]
+}
+
+export interface ContactByHcPartyPatientTagCodeDateFilter extends FilterNodeBase {
+	$type: 'ContactByHcPartyPatientTagCodeDateFilter'
+	patientSecretForeignKeys?: string[]
+}
+
+export interface ServiceByIdsFilter extends FilterNodeBase {
+	$type: 'ServiceByIdsFilter'
+	ids: string[]
+}
+
+export interface ServiceByContactsAndSubcontactsFilter extends FilterNodeBase {
+	$type: 'ServiceByContactsAndSubcontactsFilter'
+	contacts?: string[]
+	subContacts?: string[]
+	startValueDate?: number
+	endValueDate?: number
+}
+
 export type FilterNode =
 	| PlaceholderFilter
 	| PatientByHcPartyFilter
@@ -117,6 +176,15 @@ export type FilterNode =
 	| HealthElementByHcPartyTagCodeFilter
 	| InvoiceByHcPartyCodeDateFilter
 	| ContactByHcPartyTagCodeDateFilter
+	| ServiceBySecretForeignKeys
+	| ServiceByHcPartyCodesFilter
+	| ServiceByHcPartyTagCodesFilter
+	| ServiceByHcPartyPatientCodesFilter
+	| ServiceByHcPartyPatientTagCodesFilter
+	| HealthElementByHcPartySecretForeignKeysFilter
+	| ContactByHcPartyPatientTagCodeDateFilter
+	| ServiceByIdsFilter
+	| ServiceByContactsAndSubcontactsFilter
 
 // --- Variable reference (from parser $varName syntax) ---
 
@@ -165,6 +233,27 @@ export type DeferralPolicy = (filterNode: FilterNode) => boolean
 export interface RewriteResult {
 	filter: FilterNode | RequestNode
 	postFilters: PostFilter[]
+}
+
+// --- Resolution strategy types ---
+
+/** Statistics about the database, used by strategy weight calculators. */
+export interface DatabaseStats {
+	patientCount: number
+	serviceCount: number
+	healthElementCount: number
+	contactCount: number
+	invoiceCount: number
+}
+
+/** A strategy for converting entities of one type into a filter for another. */
+export interface ResolutionStrategy {
+	/** Human-readable description of the approach. */
+	description: string
+	/** Cost heuristic — lower is preferred. Takes database stats as context. */
+	weight: (stats: DatabaseStats) => number
+	/** Execute: fetch sub-entities, convert to a FilterNode for mainEntity. */
+	resolve: (body: { filter: FilterNode }, rewritten: RewriteResult) => Promise<RewriteResult>
 }
 
 // --- Peggy parse error ---

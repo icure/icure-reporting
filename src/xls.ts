@@ -1,4 +1,3 @@
-import { isObject, isArray, groupBy, mapValues } from 'lodash'
 import { utils, WorkBook, writeFile } from 'xlsx'
 
 const groups: Record<string, (item: Record<string, unknown>) => unknown> = {
@@ -26,7 +25,7 @@ const extractKeys = function (
 
 				const prefixK = prefix + k
 
-				if (isArray(val) && val.length) {
+				if (Array.isArray(val) && val.length) {
 					const grouper = k in groups ? groups[k] : undefined
 					if (!grouper) {
 						row[prefixK] = JSON.stringify(val)
@@ -34,10 +33,12 @@ const extractKeys = function (
 							[prefixK]: { displayName: prefixK.replace(/_/g, ' ') },
 						})
 					} else {
-						const obj = mapValues(
-							groupBy(val as Array<Record<string, unknown>>, grouper),
-							(a) => a[0],
-						)
+						const grouped: Record<string, Record<string, unknown>> = {}
+						for (const item of val as Array<Record<string, unknown>>) {
+							const key = String(grouper(item))
+							if (!(key in grouped)) grouped[key] = item
+						}
+						const obj = grouped
 						const {
 							spec: subSpec,
 							convDataset: [subRow],
@@ -45,7 +46,7 @@ const extractKeys = function (
 						Object.assign(row, subRow)
 						Object.assign(spec, subSpec)
 					}
-				} else if (isObject(val)) {
+				} else if (val != null && typeof val === 'object') {
 					const {
 						spec: subSpec,
 						convDataset: [subRow],

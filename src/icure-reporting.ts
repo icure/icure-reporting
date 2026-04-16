@@ -3,7 +3,6 @@ import type { Apis } from '@icure/api'
 import * as nodeCrypto from 'node:crypto'
 
 import { forEachDeep, mapDeep } from './reduceDeep.js'
-import { isObject } from 'lodash'
 import * as peggy from 'peggy'
 import { format, addMonths, addYears } from 'date-fns'
 
@@ -41,7 +40,7 @@ const options: {
 } = {
 	username: '',
 	password: '',
-	host: 'https://qa.icure.cloud',
+	host: 'https://nightly.icure.cloud',
 	repoUsername: null,
 	repoPassword: null,
 	repoHost: null,
@@ -154,7 +153,13 @@ function convertVariable(text: string): number | string {
 	return text
 }
 
-async function executeInput(input: string, exportPath?: string, deferPolicy?: DeferralPolicy) {
+async function executeInput(
+	input: string,
+	exportPath?: string,
+	deferPolicy?: DeferralPolicy,
+	strategyOverride?: string,
+	deferServiceTag?: boolean,
+) {
 	const start = +new Date()
 	const hcp = await api.healthcarePartyApi.getCurrentHealthcareParty()
 	if (!hcp) {
@@ -189,7 +194,7 @@ async function executeInput(input: string, exportPath?: string, deferPolicy?: De
 
 	const vars: Record<string, string | number> = {}
 	forEachDeep(parsedInput, (obj) => {
-		if (isObject(obj)) {
+		if (obj != null && typeof obj === 'object') {
 			const node = obj as Record<string, unknown>
 			if (typeof node.variable === 'string' && node.variable.startsWith('$')) {
 				vars[node.variable.slice(1)] = ''
@@ -209,7 +214,7 @@ async function executeInput(input: string, exportPath?: string, deferPolicy?: De
 
 	const finalResult = await filter(
 		mapDeep(parsedInput, (obj) => {
-			if (isObject(obj)) {
+			if (obj != null && typeof obj === 'object') {
 				const node = obj as Record<string, unknown>
 				if (typeof node.variable === 'string' && node.variable.startsWith('$')) {
 					return vars[node.variable.slice(1)]
@@ -221,6 +226,8 @@ async function executeInput(input: string, exportPath?: string, deferPolicy?: De
 		hcpartyId,
 		debug,
 		deferPolicy,
+		strategyOverride,
+		deferServiceTag,
 	)
 
 	if (exportPath && finalResult.rows) {
@@ -237,48 +244,81 @@ async function executeInput(input: string, exportPath?: string, deferPolicy?: De
 	log(`${(finalResult.rows || []).length} items returned in ${stop - start} ms`)
 }
 
-function parseDeferFlag(args: string[]): {
+function parseFlags(args: string[]): {
 	remaining: string[]
 	deferPolicy?: DeferralPolicy
+	strategyOverride?: string
+	deferServiceTag?: boolean
 } {
-	const idx = args.indexOf('--defer')
-	if (idx === -1) return { remaining: args }
-	if (idx + 1 >= args.length) {
+	let remaining = [...args]
+	let deferPolicy: DeferralPolicy | undefined
+	let strategyOverride: string | undefined
+	let deferServiceTag: boolean | undefined
+
+	const deferIdx = remaining.indexOf('--defer')
+	if (deferIdx !== -1 && deferIdx + 1 < remaining.length) {
+		const policyNames = remaining[deferIdx + 1].split(',')
+		// svc-tag is a field-level deferral (tag within a composite SVC filter),
+		// not a per-node policy, so we extract it here and pass it separately.
+		const nodePolicies: string[] = []
+		for (const name of policyNames) {
+			if (name === 'svc-tag') deferServiceTag = true
+			else nodePolicies.push(name)
+		}
+		if (nodePolicies.length > 0) deferPolicy = composePolicies(nodePolicies)
+		remaining = remaining.filter((_, i) => i !== deferIdx && i !== deferIdx + 1)
+	} else if (deferIdx !== -1) {
 		log(
 			pc.red(
-				'--defer requires a comma-separated list of policies: active,gender,age,all-patients',
+				'--defer requires a comma-separated list of policies: active,gender,age,all-patients,svc-tag',
 			),
 		)
-		return { remaining: args.filter((_, i) => i !== idx) }
+		remaining = remaining.filter((_, i) => i !== deferIdx)
 	}
-	const policyNames = args[idx + 1].split(',')
-	const remaining = args.filter((_, i) => i !== idx && i !== idx + 1)
-	return { remaining, deferPolicy: composePolicies(policyNames) }
+
+	const stratIdx = remaining.indexOf('--strategy')
+	if (stratIdx !== -1 && stratIdx + 1 < remaining.length) {
+		strategyOverride = remaining[stratIdx + 1]
+		remaining = remaining.filter((_, i) => i !== stratIdx && i !== stratIdx + 1)
+	} else if (stratIdx !== -1) {
+		log(pc.red('--strategy requires a strategy name'))
+		remaining = remaining.filter((_, i) => i !== stratIdx)
+	}
+
+	return { remaining, deferPolicy, strategyOverride, deferServiceTag }
 }
 
 async function cmdQuery(args: string[]) {
-	const { remaining, deferPolicy } = parseDeferFlag(args)
+	const { remaining, deferPolicy, strategyOverride, deferServiceTag } = parseFlags(args)
 	const input = remaining.join(' ')
 	if (!input) {
-		log(pc.red('Usage: query [--defer active,gender,age] <expression>'))
+		log(
+			pc.red(
+				'Usage: query [--defer active,gender,age,svc-tag] [--strategy <name>] <expression>',
+			),
+		)
 		return
 	}
 	log('Parsing query: ' + input)
 	latestQuery = input
-	await executeInput(input, undefined, deferPolicy)
+	await executeInput(input, undefined, deferPolicy, strategyOverride, deferServiceTag)
 }
 
 async function cmdExport(args: string[]) {
-	const { remaining, deferPolicy } = parseDeferFlag(args)
+	const { remaining, deferPolicy, strategyOverride, deferServiceTag } = parseFlags(args)
 	const [exportPath, ...rest] = remaining
 	if (!exportPath || rest.length === 0) {
-		log(pc.red('Usage: export [--defer active,gender,age] <path> <expression>'))
+		log(
+			pc.red(
+				'Usage: export [--defer active,gender,age,svc-tag] [--strategy <name>] <path> <expression>',
+			),
+		)
 		return
 	}
 	const input = rest.join(' ')
 	log('Parsing query: ' + input)
 	latestQuery = input
-	await executeInput(input, exportPath, deferPolicy)
+	await executeInput(input, exportPath, deferPolicy, strategyOverride, deferServiceTag)
 }
 
 async function cmdSave(args: string[]) {
